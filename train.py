@@ -1,96 +1,136 @@
-import tensorflow as tf
-from tensorflow import keras
-from keras.models import Sequential
-from keras.layers import Activation, Dense, Flatten, BatchNormalization, Conv2D, MaxPool2D, Dropout
-from keras.optimizers import Adam, SGD
-from keras.metrics import categorical_crossentropy
-from keras.preprocessing.image import ImageDataGenerator
-import itertools
-import random
-import warnings
-import numpy as np
-import cv2
-from keras.callbacks import ReduceLROnPlateau
 from keras.callbacks import ModelCheckpoint, EarlyStopping
-import matplotlib.pyplot as plt
-warnings.simplefilter(action='ignore', category=FutureWarning)
-clss=13
-
-train_path = "gesture/train"
-test_path =  "gesture/test"
-
-train_batches = ImageDataGenerator(preprocessing_function=tf.keras.applications.vgg16.preprocess_input).flow_from_directory(directory=train_path, target_size=(64,64), class_mode='categorical', batch_size=10,shuffle=True)
-test_batches = ImageDataGenerator(preprocessing_function=tf.keras.applications.vgg16.preprocess_input).flow_from_directory(directory=test_path, target_size=(64,64), class_mode='categorical', batch_size=10, shuffle=True)
-
-imgs, labels = next(train_batches)
-
-
-#Plotting the images...
-def plotImages(images_arr):
-    fig, axes = plt.subplots(1, 10, figsize=(30,20))
-    axes = axes.flatten()
-    for img, ax in zip( images_arr, axes):
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        ax.imshow(img)
-        ax.axis('off')
-    plt.tight_layout()
-    plt.show()
+from keras.callbacks import ReduceLROnPlateau
+from keras.preprocessing.image import ImageDataGenerator
+from sklearn.model_selection import train_test_split
+from keras.layers import Activation, Convolution2D, Dropout, Conv2D
+from keras.layers import AveragePooling2D, BatchNormalization
+from keras.layers import GlobalAveragePooling2D
+from keras.models import Sequential
+from keras.layers import Flatten
+from keras.models import Model
+from keras.layers import Input
+from keras.layers import MaxPooling2D
+from keras.layers import SeparableConv2D
+from keras import layers
+from keras.regularizers import l2
+import pandas as pd
+import cv2
+import numpy as np
 
 
-plotImages(imgs)
-print(imgs.shape)
-print(labels)
+dataset_path = 'fer2013/fer2013/fer2013.csv'
+image_size=(48,48)
 
-model = Sequential()
+def load_fer2013():
+        data = pd.read_csv(dataset_path)
+        pixels = data['pixels'].tolist()
+        width, height = 48, 48
+        faces = []
+        for pixel_sequence in pixels:
+            face = [int(pixel) for pixel in pixel_sequence.split(' ')]
+            face = np.asarray(face).reshape(width, height)
+            face = cv2.resize(face.astype('uint8'),image_size)
+            faces.append(face.astype('float32'))
+        faces = np.asarray(faces)
+        faces = np.expand_dims(faces, -1)
+        emotions = pd.get_dummies(data['emotion']).to_numpy()
+        return faces, emotions
 
-model.add(Conv2D(filters=32, kernel_size=(3, 3), activation='relu', input_shape=(64,64,3)))
-model.add(MaxPool2D(pool_size=(2, 2), strides=2))
-
-model.add(Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding = 'same'))
-model.add(MaxPool2D(pool_size=(2, 2), strides=2))
-
-model.add(Conv2D(filters=128, kernel_size=(3, 3), activation='relu', padding = 'valid'))
-model.add(MaxPool2D(pool_size=(2, 2), strides=2))
-
-model.add(Flatten())
-
-model.add(Dense(64,activation ="relu"))
-model.add(Dense(128,activation ="relu"))
-#model.add(Dropout(0.2))
-model.add(Dense(128,activation ="relu"))
-#model.add(Dropout(0.3))
-model.add(Dense(clss,activation ="softmax"))
-
-
-model.compile(optimizer=Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=1, min_lr=0.0001)
-early_stop = EarlyStopping(monitor='val_loss', min_delta=0, patience=2, verbose=0, mode='auto')
+def preprocess_input(x, v2=True):
+    x = x.astype('float32')
+    x = x / 255.0
+    if v2:
+        x = x - 0.5
+        x = x * 2.0
+    return x
 
 
+# parameters
+batch_size = 32
+num_epochs = 10000
+input_shape = (48, 48, 1)
+validation_split = .2
+verbose = 1
+num_classes = 7
+patience = 50
 
-model.compile(optimizer=SGD(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=1, min_lr=0.0005)
-early_stop = EarlyStopping(monitor='val_loss', min_delta=0, patience=2, verbose=0, mode='auto')
+# data generator
+data_generator = ImageDataGenerator(
+                        featurewise_center=False,
+                        featurewise_std_normalization=False,
+                        rotation_range=10,
+                        width_shift_range=0.1,
+                        height_shift_range=0.1,
+                        zoom_range=.1,
+                        horizontal_flip=True)
 
 
-history2 = model.fit(train_batches, epochs=10, callbacks=[reduce_lr, early_stop],  validation_data = test_batches)#, checkpoint])
-imgs, labels = next(train_batches) # For getting next batch of imgs...
+def cnn(input_shape, num_classes):
+    img_input = Input(input_shape)
+    x = Conv2D(32, (3, 3), strides=(2, 2), use_bias=False)(img_input)
+    x = BatchNormalization(name='block1_conv1_bn')(x)
+    x = Activation('relu', name='block1_conv1_act')(x)
+    x = Conv2D(64, (3, 3), use_bias=False)(x)
+    x = BatchNormalization(name='block1_conv2_bn')(x)
+    x = Activation('relu', name='block1_conv2_act')(x)
 
-imgs, labels = next(test_batches) # For getting next batch of imgs...
-scores = model.evaluate(imgs, labels, verbose=0)
-print(f'{model.metrics_names[0]} of {scores[0]}; {model.metrics_names[1]} of {scores[1]*100}%')
+    residual = Conv2D(128, (1, 1), strides=(2, 2),
+                      padding='same', use_bias=False)(x)
+    residual = BatchNormalization()(residual)
+
+    x = SeparableConv2D(128, (3, 3), padding='same', use_bias=False)(x)
+    x = BatchNormalization(name='block2_sepconv1_bn')(x)
+    x = Activation('relu', name='block2_sepconv2_act')(x)
+    x = SeparableConv2D(128, (3, 3), padding='same', use_bias=False)(x)
+    x = BatchNormalization(name='block2_sepconv2_bn')(x)
+
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+    x = layers.add([x, residual])
+
+    residual = Conv2D(256, (1, 1), strides=(2, 2),
+                      padding='same', use_bias=False)(x)
+    residual = BatchNormalization()(residual)
+
+    x = Activation('relu', name='block3_sepconv1_act')(x)
+    x = SeparableConv2D(256, (3, 3), padding='same', use_bias=False)(x)
+    x = BatchNormalization(name='block3_sepconv1_bn')(x)
+    x = Activation('relu', name='block3_sepconv2_act')(x)
+    x = SeparableConv2D(256, (3, 3), padding='same', use_bias=False)(x)
+    x = BatchNormalization(name='block3_sepconv2_bn')(x)
+
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+    x = layers.add([x, residual])
+    x = Conv2D(num_classes, (3, 3),
+            #kernel_regularizer=regularization,
+            padding='same')(x)
+    x = GlobalAveragePooling2D()(x)
+    output = Activation('softmax',name='predictions')(x)
+
+    model = Model(img_input, output)                                                                                                                                        
+    return model
 
 
-model.save('best_model.h5')
-
-print(history2.history)
-
-imgs, labels = next(test_batches)
-
-model = keras.models.load_model(r"best_model.h5")
-
-scores = model.evaluate(imgs, labels, verbose=0)
-print(f'{model.metrics_names[0]} of {scores[0]}; {model.metrics_names[1]} of {scores[1]*100}%')
-
+# model parameters/compilation
+model = cnn(input_shape, num_classes)
+model.compile(optimizer='adam', loss='categorical_crossentropy',
+              metrics=['accuracy'])
 model.summary()
 
+early_stop = EarlyStopping('val_loss', patience=patience)
+reduce_lr = ReduceLROnPlateau('val_loss', factor=0.1,
+                                  patience=int(patience/4), verbose=1)
+model_names =  'emotion.h5'
+model_checkpoint = ModelCheckpoint(model_names, 'val_loss', verbose=1,
+                                                    save_best_only=True)
+callbacks = [model_checkpoint,  early_stop, reduce_lr]
+
+# loading dataset
+faces, emotions = load_fer2013()
+faces = preprocess_input(faces)
+num_samples, num_classes = emotions.shape
+xtrain, xtest,ytrain,ytest = train_test_split(faces, emotions,test_size=0.2,shuffle=True)
+model.fit_generator(data_generator.flow(xtrain, ytrain,
+                                            batch_size),
+                        steps_per_epoch=len(xtrain) / batch_size,
+                        epochs=num_epochs, verbose=1, callbacks=callbacks,
+                        validation_data=(xtest,ytest))
